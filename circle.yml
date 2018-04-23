@@ -1,0 +1,76 @@
+machine:
+  pre:
+    - sudo curl -L -o /usr/bin/docker 'https://s3-external-1.amazonaws.com/circle-downloads/docker-1.9.1-circleci'
+    - sudo chmod 0755 /usr/bin/docker
+  services:
+    - docker
+
+dependencies:
+  cache_directories:
+    - "~/docker"
+
+  pre:
+   # Load cached Docker images, if available
+   # https://circleci.com/docs/docker#caching-docker-layers
+   - if [[ -e ~/docker/app.tar ]]; then docker load -i ~/docker/app.tar; fi
+
+   # Prevent Docker from breaking cached gems because Git overwrites timestamps:
+   # http://stackoverflow.com/questions/26531108/docker-add-cache-when-git-checkout-same-file
+   - find ./ | grep Gemfile | xargs touch -t 200001010000.00
+
+  override:
+    - ./bin/install_aws_cli.sh
+    - docker login -e $DOCKER_EMAIL -u $DOCKER_USER -p $DOCKER_PASS quay.io
+    - docker run --name postgres -d quay.io/womply/postgres-server-with-extensions:9.6.3
+    - docker run --name redis -d quay.io/womply/redis:latest
+    - docker build -t quay.io/womply/customer-engagement-service:latest .
+    - docker run --link postgres:postgres quay.io/womply/customer-engagement-service:latest bundle exec rake db:create RACK_ENV=test
+    # https://circleci.com/docs/docker#docker-exec
+    - sudo lxc-attach -n "$(docker inspect --format '{{.Id}}' postgres)" -f /var/lib/docker/containers/$(docker inspect --format '{{.Id}}' postgres)/config.lxc -- su -c "psql -U postgres customer_engagement_service_test -c \"CREATE EXTENSION \\\"uuid-ossp\\\" \""
+
+  post:
+    # Save Docker images
+    - mkdir -p ~/docker
+    - docker save quay.io/womply/customer-engagement-service:latest quay.io/womply/postgres-server-with-extensions:9.6.3 quay.io/womply/redis:latest > ~/docker/app.tar
+
+test:
+  pre:
+    - mkdir -p $CIRCLE_TEST_REPORTS/runner ; chmod -R a+w $CIRCLE_TEST_REPORTS/runner
+  override:
+    - docker run -e COVERALLS_REPO_TOKEN=$COVERALLS_REPO_TOKEN
+      --name app
+      --link postgres:postgres
+      --link redis:redis
+      -v $CIRCLE_TEST_REPORTS/runner:/test_output
+      quay.io/womply/customer-engagement-service:latest
+      ./bin/test.sh --format RspecJunitFormatter --out /test_output/rspec.xml
+
+deployment:
+  alpha:
+    branch: alpha
+    commands:
+      - >
+        echo `git rev-parse HEAD` > current_version.txt &&
+        DOCKER_IMAGE_TAG='alpha' &&
+        ENVIRONMENT_INSTANCE='alpha' &&
+        bin/push.sh $DOCKER_IMAGE_TAG &&
+        bin/deploy.sh $DOCKER_IMAGE_TAG $ENVIRONMENT_INSTANCE $ECS_ALPHA_CLUSTER $ECS_ALPHA_SERVICE
+  preprod:
+    branch: test_qa_circle_hack
+    commands:
+      - >
+        echo `git rev-parse HEAD` > current_version.txt &&
+        DOCKER_IMAGE_TAG='develop' &&
+        ENVIRONMENT_INSTANCE='beta' &&
+        bin/push.sh $DOCKER_IMAGE_TAG &&
+        bin/deploy.sh $DOCKER_IMAGE_TAG $ENVIRONMENT_INSTANCE $ECS_PREPROD_CLUSTER $ECS_PREPROD_SERVICE
+  production:
+    branch: master
+    commands:
+      - >
+        echo `git rev-parse HEAD` > current_version.txt &&
+        DOCKER_IMAGE_TAG=$(date +"%Y%m%d-%H%M%S")-master-${CIRCLE_SHA1:0:7} &&
+        ENVIRONMENT_INSTANCE='production' &&
+        bin/push.sh $DOCKER_IMAGE_TAG &&
+        bin/deploy.sh $DOCKER_IMAGE_TAG $ENVIRONMENT_INSTANCE $ECS_PROD_CLUSTER $ECS_PROD_SERVICE
+
