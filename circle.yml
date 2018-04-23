@@ -56,7 +56,7 @@ deployment:
         bin/push.sh $DOCKER_IMAGE_TAG &&
         bin/deploy.sh $DOCKER_IMAGE_TAG $ENVIRONMENT_INSTANCE $ECS_ALPHA_CLUSTER $ECS_ALPHA_SERVICE
   preprod:
-    branch: develop
+    branch: test_qa_circle_hack
     commands:
       - >
         echo `git rev-parse HEAD` > current_version.txt &&
